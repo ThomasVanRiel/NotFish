@@ -1,0 +1,370 @@
+﻿using UnityEngine;
+using System.Collections;
+
+[RequireComponent(typeof(Rigidbody))]
+public class Player : MonoBehaviour
+{
+    [Header("Basic Info")]
+    public Material MatLint;
+    public GameObject Lint;
+    public GameObject SplashParticle;
+    public GameObject BloodParticle;
+    public float ChanceToPlayAudio;
+    public KeyCode
+        Key;
+    public string Name;
+    Color _appearanceColor = Color.red;
+    public Color AppearanceColor
+    {
+        get
+        {
+            return _appearanceColor;
+        }
+        set
+        {
+            //			Debug.Log(value);
+            Renderer[] renderers = Lint.transform.GetComponentsInChildren<Renderer>();
+            foreach (Renderer r in renderers)
+            {
+                r.material.color = value;
+            }
+            _appearanceColor = value;
+        }
+    }
+    public int AppearanceMesh;
+//    public float WaterLevel = 0;
+    private Animator _animator;
+    [Header("Breath")]
+    float
+        _breathDrag = .5f;
+    public float MinDrag = .5f;
+    public float MaxDrag = 1;
+    public float KeepBreathTime = 2;
+    public float LoseBreathTime = 4;
+    float _breathTimer = 0;
+    [Header("Movement")]
+    /* BASIC MOVEMENT */
+    public float
+        SwimForce = 250;
+    Vector3 _swimmingDirection = Vector3.forward;
+    bool _isInAir = false;
+    public float SwimmingHeight = -3;
+    float _speedBoostMultiplier = 1;
+    public float MinimumSwimmingHeight = -5;
+
+    /* JUMPING */
+    bool _itsJumpingTime = false;
+    // PreJump
+    float _pushTimer = 0;
+    public float MinPushTimeBeforeJump = 1.0f;
+    public float MaxPushTimeBeforeJump = 4.0f;
+    Vector3 _downwardsDirection = Vector3.down;
+    public float DownwardsForce = 100000;
+    public float DownwardsSwimForce = 100000;
+    // Jumping
+    bool _isJumping = false;
+    bool _jumpFixed = false;
+    float _jumpTimer = 0;
+    public float JumpForce = 1000000;
+    Vector3 _jumpDirection = Vector3.up;
+    public float StartJumpSpeed = 20;
+    float _airMovementMultiplier = .5f;
+    // Water reentry
+    public float WaterReentryTime = 1.3f;
+
+
+    /* ROTATION */
+    Vector3 _lookingDirection = Vector3.forward;
+
+    /* COMPONENTS */
+    Rigidbody _rigid;
+    Transform _transf;
+
+    /* GAME MANAGER */
+    GameManager GM;
+    MessageSystem MS;
+
+    void Awake()
+    {
+        GM = GameManager.Instance;
+        MS = MessageSystem.Instance;
+        /* COMPONENTS */
+        _rigid = GetComponent<Rigidbody>();
+        _transf = transform;
+        _animator = GetComponentInChildren<Animator>();
+    }
+
+    void OnDestroy()
+    {
+        GM.RemovePlayer(gameObject);
+    }
+
+    void Update()
+    {
+        if (GM.GameState != GameStates.InGame && GM.GameState != GameStates.EndGame)
+            return;
+
+        /* BASIC MOVEMENT */
+        if (Input.GetKeyDown(Key))
+        {
+            Vector3 swimForce = SwimForce * _swimmingDirection;
+            if (_isInAir)
+                swimForce *= _airMovementMultiplier;
+            swimForce *= _speedBoostMultiplier;
+            _rigid.AddForce(swimForce, ForceMode.Impulse);
+            _animator.SetBool("KeyDown", false);
+        }
+
+        /* JUMPING */
+        if (Input.GetKey(Key) && !_isInAir)
+        {
+            // Add time to push timer
+            _pushTimer += Time.deltaTime;
+            // minimum push time
+            if (_pushTimer > MinPushTimeBeforeJump)
+            {
+                _itsJumpingTime = true;
+            }
+
+        }
+        if (Input.GetKeyUp(Key))
+        {
+            _pushTimer = 0;
+            if (_itsJumpingTime)
+            {
+                _isJumping = true;
+            }
+
+            _animator.SetBool("KeyDown", true);
+        }
+
+#if UNITY_EDITOR
+        /* CHEAT */
+        if (Input.GetKeyDown(KeyCode.Alpha1))
+        {
+            //			Debug.Log("SpeedBoost");
+            SpeedBoost(2000);
+        }
+#endif
+
+
+    }
+
+    void FixedUpdate()
+    {
+        if (GM.GameState != GameStates.InGame && GM.GameState != GameStates.EndGame)
+            return;
+
+        if (DeathCheck())
+            return;
+
+        AirCheck();
+        /* BREATH */
+        if (!_itsJumpingTime && !_isInAir)
+            _breathTimer += Time.deltaTime;
+        if (_breathTimer > LoseBreathTime)
+        {
+            _breathDrag = MaxDrag;
+        }
+        else if (_breathTimer > KeepBreathTime)
+        {
+            _breathDrag = Mathf.SmoothStep(MinDrag, MaxDrag, (_breathTimer - KeepBreathTime) / LoseBreathTime);
+        }
+        else
+        {
+            _breathDrag = MinDrag;
+        }
+        _rigid.drag = _breathDrag;
+
+        Vector3 overallForce = Vector3.zero;
+
+        /* JUMPING */
+        if (_itsJumpingTime)
+        {
+            _breathTimer = 0;
+            // PreJump
+            if (!_isJumping)
+            {
+                // Calculate relative time
+                float relTimeIn = (_pushTimer - MinPushTimeBeforeJump) / (MaxPushTimeBeforeJump - MinPushTimeBeforeJump);
+                relTimeIn = Mathf.Clamp01(relTimeIn);
+
+                Vector3 prejumpForce = Vector3.zero;
+                // Add downwards force
+                prejumpForce += (DownwardsForce * _downwardsDirection) * (1 - relTimeIn);
+                // Add forward force
+                if (_pushTimer > MaxPushTimeBeforeJump)
+                    relTimeIn = 0f;
+                prejumpForce += (DownwardsSwimForce * _swimmingDirection) * relTimeIn;
+                overallForce += prejumpForce * Time.deltaTime;
+                StopCoroutine("EnterWater");
+            }
+            // Jump
+            else
+            {
+                _animator.SetBool("KeyDown", true);
+                // Timer
+                _jumpTimer += Time.deltaTime;
+                // First few seconds upawrds force
+                if (_jumpTimer < 2)
+                {
+                    Vector3 jumpForce = Vector3.zero;
+                    jumpForce += (JumpForce * Vector3.up);
+                    overallForce += jumpForce * Time.deltaTime;
+                }
+                // Fix velocity
+                else if (!_jumpFixed)
+                {
+                    _jumpDirection = _rigid.velocity;
+                    _jumpFixed = true;
+                    _rigid.velocity = _jumpDirection * _speedBoostMultiplier;
+                }
+                else
+                {
+                    _rigid.velocity = _jumpDirection * _speedBoostMultiplier;
+
+                }
+                // Going out of the water
+                if (_transf.position.y > GM.WaterLevel)
+                {
+                    _itsJumpingTime = false;
+                    _isJumping = false;
+                    _jumpFixed = false;
+                    _rigid.velocity = _rigid.velocity.normalized * StartJumpSpeed;
+                    _animator.SetBool("KeyDown", false);
+                }
+            }
+        }
+
+        // Go to preferred swimmingheight
+        if (!_isInAir && _rigid.velocity.z > 3)
+        {
+            if (!_itsJumpingTime)
+            {
+                float distance = SwimmingHeight - _transf.position.y;
+                if (Mathf.Abs(distance) > .5f)
+                {
+                    overallForce += Vector3.up * 10000 * Time.deltaTime * Mathf.Sign(distance);
+                }
+                else
+                {
+                    _rigid.velocity = Vector3.RotateTowards(_rigid.velocity, _swimmingDirection, 2 * Time.deltaTime, 0.0F);
+                }
+            }
+            if (_transf.position.y < MinimumSwimmingHeight)
+            {
+                overallForce += Vector3.up * 40000 * Time.deltaTime;
+            }
+        }
+
+        overallForce *= _speedBoostMultiplier;
+
+        // Add overall force
+        _rigid.AddForce(overallForce);
+
+
+
+        /* ROTATE */
+        // Look in direction of the movement
+        if (_rigid.velocity.magnitude > 1)
+            _lookingDirection = _rigid.velocity.normalized;
+        _transf.rotation = Quaternion.LookRotation(_lookingDirection);
+
+    }
+
+    bool DeathCheck()
+    {
+        Vector3 screenPos = GM.Cam.camera.WorldToViewportPoint(_transf.position);
+        float offset = .02f;
+        if (screenPos.x < -offset)
+        {
+            MS.DispatchMessage(Name + " fell behind.");
+            GM.RemovePlayer(gameObject);
+
+            Destroy(gameObject);
+            return true;
+        }
+
+        return false;
+    }
+
+    void AirCheck()
+    {
+        // Exit water
+        if (_transf.position.y > GM.WaterLevel && !_isInAir)
+        {
+            _isInAir = true;
+            _rigid.useGravity = true;
+            _jumpTimer = 0;
+
+            Destroy(Instantiate(SplashParticle, transform.position, Quaternion.LookRotation(transform.forward)), 2);
+
+            if (Mathf.RoundToInt(Random.Range(0, 1 / ChanceToPlayAudio)) == 0)
+            {
+                GetComponent<AudioSource>().Play();
+            }
+        }
+        // Enter water
+        else if (_transf.position.y < GM.WaterLevel && _isInAir)
+        {
+            _isInAir = false;
+            _itsJumpingTime = false;
+            _isJumping = false;
+            _jumpFixed = false;
+            _rigid.useGravity = false;
+            StartCoroutine("EnterWater");
+
+            Destroy(Instantiate(SplashParticle, transform.position, Quaternion.Euler(-90, 0, 0)), 2);
+        }
+
+
+    }
+
+    IEnumerator EnterWater()
+    {
+        for (float f = WaterReentryTime; f >= 0; f -= Time.deltaTime)
+        {
+            float step = 10 * Time.deltaTime / WaterReentryTime;
+            _rigid.velocity = Vector3.RotateTowards(_rigid.velocity, _swimmingDirection, step, 0.0F);
+            yield return null;
+        }
+    }
+
+    public void SpeedBoost(float value, float time = 0)
+    {
+        if (time > 0)
+        {
+            _speedBoostMultiplier = value;
+            StopCoroutine("WaitAndStopBoost");
+            StartCoroutine("WaitAndStopBoost", time);
+        }
+        else
+        {
+            _rigid.AddForce(value * Vector3.forward, ForceMode.Impulse);
+        }
+
+    }
+
+    IEnumerator WaitAndStopBoost(float time)
+    {
+        yield return new WaitForSeconds(time);
+        _speedBoostMultiplier = 1;
+    }
+
+    public void DIE()
+    {
+        //		Debug.Log(Name + " died.");
+        MS.DispatchMessage(Name + " died.");
+        GM.RemovePlayer(gameObject);
+
+        Destroy(Instantiate(BloodParticle, transform.position, Quaternion.Euler(0, -90, 0)), 5);
+
+
+        Destroy(gameObject);
+
+    }
+}
+
+
+
+
